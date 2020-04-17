@@ -128,7 +128,7 @@ def setup(args):
     cfg.SOLVER.IMS_PER_BATCH = 8
     cfg.MODEL.MASK_ON = False
     cfg.SOLVER.BASE_LR = 0.00025  # 学习率
-    cfg.SOLVER.MAX_ITER = 10000  # 最大迭代次数 150000/8
+    cfg.SOLVER.MAX_ITER = 20000  # 最大迭代次数 150000/8
     cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # 只有一个类别：红绿灯
     cfg.NUM_GPUS = 2
