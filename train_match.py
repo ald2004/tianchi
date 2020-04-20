@@ -28,6 +28,8 @@ from detectron2.utils.events import (
     TensorboardXWriter,
 )
 
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(filename)s - %(lineno)d  -   %(message)s',
+                    datefmt='%Y/%m/%d %H:%M:%S')
 logger = logging.getLogger("detectron2_tianchi")
 DATA_ROOT_DIR = 'data'  # tcdata_train/train_dataset_part1
 IS_LOCAL = True  # if local or aliyun
@@ -130,13 +132,18 @@ def get_trainval_pos_pair_dicts(dataset_name, cache_dir='/opt/gitserial/tianchi/
         #     break
         # vv ['028345', '017278', '002328'] :  {'file_pair': ['i_001504_1.jpg', 'v_001504_0', 'v_001504_120',],'train_dir_num': 'train_dataset_part6'}
         file_pair = vv['file_pair']
+        train_dir_num = vv['train_dir_num']
         if not (len(file_pair)):
             continue
         x1_filename = vv['file_pair'][0]  # 'i_001504_1.jpg'
+        a1, a2 = x1_filename.strip().split('_')[1], x1_filename.strip().split('_')[2]
+        tmpfilename = os.path.join(os.path.abspath('.'), DATA_ROOT_DIR, train_dir_num, 'image', a1, a2)
         x2_filenames = vv['file_pair'][1:]
         if not len(x1_filename) or not len(x2_filenames):
             continue
-        train_dir_num = vv['train_dir_num']
+        if not os.path.exists(tmpfilename):
+            continue
+
         item_id = str(x1_filename.strip().split('_')[1])
         record = {}
         record["filename_x1"] = x1_filename
@@ -173,8 +180,11 @@ def mapper(dataset_dict):
     image_x1 = torch.as_tensor(image_x1.astype("float32").transpose(2, 0, 1))
     video_images = os.path.join(os.path.abspath('.'), DATA_ROOT_DIR, train_dir_num, 'video_images')
     if IS_LOCAL or os.path.exists(video_images):
-        images_x2 = [utils.read_image(os.path.join(video_images, x) + '.jpg').astype("float32").transpose(2, 0, 1) for x
-                     in filename_x2]
+        try:
+            images_x2 = [utils.read_image(os.path.join(video_images, x) + '.jpg').astype("float32").transpose(2, 0, 1)
+                         for x in filename_x2]
+        except:
+            images_x2 = []
     else:
         import cv2
         images_x2 = []
@@ -291,9 +301,9 @@ def do_train(cfg, od_model, mmmodel, resume=False):
             if iteration - start_iter > 5 and (iteration % 20 == 0 or iteration == max_iter):
                 for writer in writers:
                     writer.write()
-                chk_file_name = os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR) + f'checkpoint_{iteration}.pth'
+                chk_file_name = os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR, f'checkpoint_{iteration}.pth')
                 logger.info(f'saved model to :{chk_file_name}')
-                torch.save(mmmodel, chk_file_name)
+                torch.save(mmmodel.cpu().state_dict(), chk_file_name)
             # if iteration - start_iter > 5 and (iteration % 100 == 0 or iteration == max_iter):
             #     torch.save(mmmodel, os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR) + f'checkpoint_{iteration}.pth')
             # 'mm_outputs/checkpoint_' + str(epoch + 1) + '.pth')
