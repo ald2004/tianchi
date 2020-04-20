@@ -2,7 +2,8 @@
 /data
 /model/
 /output/
+/mmoutput/
 nohup.out
 .ipynb_checkpoints/
 tenk.out
-train_match.py
+test.py
