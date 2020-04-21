@@ -1,3 +1,4 @@
+
 import logging
 import os, time
 import pickle
@@ -28,9 +29,10 @@ from detectron2.utils.events import (
     TensorboardXWriter,
 )
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(filename)s - %(lineno)d  -   %(message)s',
-                    datefmt='%Y/%m/%d %H:%M:%S')
-logger = logging.getLogger("detectron2_tianchi")
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(filename)s - %(lineno)d  -   %(message)s', datefmt='%Y/%m/%d %H:%M:%S')
+logger = logging.getLogger(__name__)
+# logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 DATA_ROOT_DIR = 'data'  # tcdata_train/train_dataset_part1
 IS_LOCAL = True  # if local or aliyun
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1"
@@ -276,13 +278,13 @@ def do_train(cfg, od_model, mmmodel, resume=False):
             pos_pair_num, running_loss = 0, 0.0
             for data in batch:
                 try:
-                    x1_fec = get_roi_feat(data['train_x1'], od_model)[0].unsqueeze(0)
+                    x1_fec = get_roi_feat(data['train_x1'].cuda(), od_model)[0].unsqueeze(0)
                     x1_fec = x1_fec.detach()
                 except:
                     continue
                 for x2s in data['train_x2']:
                     try:
-                        x2s_fec = get_roi_feat(x2s, od_model)[0].unsqueeze(0)
+                        x2s_fec = get_roi_feat(x2s.cuda(), od_model)[0].unsqueeze(0)
                         x2s_fec = x2s_fec.detach()
                     except:
                         continue
@@ -290,7 +292,7 @@ def do_train(cfg, od_model, mmmodel, resume=False):
                     # loss_dict = model(data)
                     # print(x1_fec.shape, '======================', x2s_fec.shape)
                     optimizer.zero_grad()
-                    output = mmmodel(x1_fec, x2s_fec).cuda()
+                    output = mmmodel(x1_fec.cuda(), x2s_fec.cuda())
                     loss = criterion(output, label)
                     assert torch.isfinite(loss).all()
                     loss.backward()
@@ -303,7 +305,7 @@ def do_train(cfg, od_model, mmmodel, resume=False):
                     writer.write()
                 chk_file_name = os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR, f'checkpoint_{iteration}.pth')
                 logger.info(f'saved model to :{chk_file_name}')
-                torch.save(mmmodel.cpu().state_dict(), chk_file_name)
+                torch.save(mmmodel.state_dict(), chk_file_name)
             # if iteration - start_iter > 5 and (iteration % 100 == 0 or iteration == max_iter):
             #     torch.save(mmmodel, os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR) + f'checkpoint_{iteration}.pth')
             # 'mm_outputs/checkpoint_' + str(epoch + 1) + '.pth')
@@ -336,7 +338,7 @@ def main(args):
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.7  # set the testing threshold for this model
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1
     cfg.DATASETS.TEST = ("tianchi_val",)
-    od_model = build_model(cfg)
+    od_model = build_model(cfg).cuda()
     DetectionCheckpointer(od_model).load(cfg.MODEL.WEIGHTS)
     # logging.getLogger().disabled = True
     mmcfg = get_cfg()
@@ -345,23 +347,24 @@ def main(args):
     mmcfg.DATASETS.TEST = ("match_val",)
     mmcfg.DATALOADER.NUM_WORKERS = 2
     # 从 Model Zoo 中获取预训练模型
-    mmcfg.MODEL.WEIGHTS = "model/mmmodel_final_280758.pkl"
+    mmcfg.MODEL.WEIGHTS = "mmoutput/checkpoint_1000.pth"
     mmcfg.SOLVER.IMS_PER_BATCH = 32
     mmcfg.MODEL.MASK_ON = False
     mmcfg.SOLVER.BASE_LR = 0.00025  # 学习率
     mmcfg.SOLVER.MAX_ITER = 3750  # 最大迭代次数 30000/8
-    mmcfg.SOLVER.MAX_ITER = 1000  # 最大迭代次数 30000/32
+    mmcfg.SOLVER.MAX_ITER = 1050  # 最大迭代次数 30000/32
     mmcfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128
     mmcfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # 只有一个类别：红绿灯
     mmcfg.NUM_GPUS = 2
     mmcfg.DATALOADER.ASPECT_RATIO_GROUPING = False
     os.makedirs(mmcfg.OUTPUT_DIR, exist_ok=True)
     mmmodel = MatchModel().cuda()
+    mmmodel.load_state_dict(torch.load(mmcfg.MODEL.WEIGHTS))
     # distributed = comm.get_world_size() > 1
     # if distributed:
     #     od_model = DistributedDataParallel(od_model, device_ids=[comm.get_local_rank()], broadcast_buffers=False)
     #     mmmodel = DistributedDataParallel(mmmodel, device_ids=[comm.get_local_rank()], broadcast_buffers=False)
-
+    logger.info(mmcfg)
     return do_train(mmcfg, od_model, mmmodel, resume=True)
 
 
@@ -369,7 +372,7 @@ if __name__ == "__main__":
     # ./train_match.py --num-gpu 2 --resume
     args = default_argument_parser().parse_args()
     args.config_file = 'configs/COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml'
-    print("Command Line Args:", args)
+    logger.info("Command Line Args:", args)
     launch(
         main,
         args.num_gpus,
