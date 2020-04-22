@@ -372,7 +372,7 @@ if __name__ == "__main__":
     # ./train_match.py --num-gpu 2 --resume
     args = default_argument_parser().parse_args()
     args.config_file = 'configs/COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml'
-    logger.info("Command Line Args:", args)
+    logger.info(f"Command Line Args:{args}")
     launch(
         main,
         args.num_gpus,
@@ -381,3 +381,6 @@ if __name__ == "__main__":
         dist_url=args.dist_url,
         args=(args,),
     )
+
+
+    ddd
