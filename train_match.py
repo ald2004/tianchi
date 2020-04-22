@@ -1,7 +1,8 @@
-
 import logging
-import os, time
+import os
 import pickle
+import random
+import time
 
 import detectron2.utils.comm as comm
 import torch
@@ -10,9 +11,7 @@ import torch.optim as optim
 from detectron2.checkpoint import DetectionCheckpointer, PeriodicCheckpointer
 from detectron2.config import get_cfg
 from detectron2.data import (
-    build_detection_train_loader,
     detection_utils as utils,
-    DatasetCatalog,
     MetadataCatalog,
 )
 from detectron2.engine import default_argument_parser, default_setup, launch
@@ -28,8 +27,11 @@ from detectron2.utils.events import (
     JSONWriter,
     TensorboardXWriter,
 )
+from torch.utils.data import TensorDataset, DataLoader, RandomSampler
+from tqdm import tqdm as tqdm
 
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(filename)s - %(lineno)d  -   %(message)s', datefmt='%Y/%m/%d %H:%M:%S')
+logging.basicConfig(format='%(asctime)s - %(levelname)s - %(filename)s - %(lineno)d  -   %(message)s',
+                    datefmt='%Y/%m/%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.INFO)
 logger.setLevel(logging.DEBUG)
@@ -227,17 +229,17 @@ def get_roi_feat(images, od_model):
     return mask_features
 
 
-def do_train(cfg, od_model, mmmodel, resume=False):
+def do_train(cfg, mmmodel, resume=False):
     mmmodel.train()
-    od_model.eval()
-    for d in [
-        cfg.DATASETS.TRAIN[0],
-        # cfg.DATASETS.TEST[0,
-    ]:
-        DatasetCatalog.register(d, lambda d=d: get_trainval_pos_pair_dicts(d))
-        MetadataCatalog.get(d).set(thing_classes=["cloth"])
-        if d.endswith('val'):
-            MetadataCatalog.get(d).evaluator_type = "coco"
+    # od_model.eval()
+    # for d in [
+    #     cfg.DATASETS.TRAIN[0],
+    #     # cfg.DATASETS.TEST[0,
+    # ]:
+    #     DatasetCatalog.register(d, lambda d=d: get_trainval_pos_pair_dicts(d))
+    #     MetadataCatalog.get(d).set(thing_classes=["cloth"])
+    #     if d.endswith('val'):
+    #         MetadataCatalog.get(d).evaluator_type = "coco"
 
     # optimizer = optim.SGD(mmmodel.parameters(), lr=0.0025, momentum=0.9)
     optimizer = build_optimizer(cfg, mmmodel)
@@ -265,66 +267,98 @@ def do_train(cfg, od_model, mmmodel, resume=False):
         if comm.is_main_process()
         else []
     )
-    data_loader = build_detection_train_loader(cfg, mapper=mapper)
+    # dataset
+    with open('cache/item_fect_dict.pkl', 'rb') as fid:
+        pic_fec_dict = pickle.load(fid)
+    with open('cache/video_fect_dict.pkl', 'rb') as fid:
+        video_fec_dict = pickle.load(fid)
+
+    x1, x2 = [], []
+    for k in pic_fec_dict.keys():
+        item_fec = pic_fec_dict[k]
+        if item_fec:
+            video_fec = video_fec_dict.get(k)
+            if video_fec:
+                x1.append(item_fec)
+                x2.append(video_fec)
+    x1, x2 = torch.stack(x1), torch.stack(x2)
+    pos_label = torch.tensor([1.0], dtype=torch.long)
+    assert x1.size(0) == x2.size(0)
+    pos_train_dataset = TensorDataset(x1, x2)
+    pos_train_sampler = RandomSampler(pos_train_dataset)
+    pos_data_loader = DataLoader(pos_train_dataset, sampler=pos_train_sampler, batch_size=1)
+
+    y1, y2 = [], []
+    for k in pic_fec_dict.keys():
+        item_fec = pic_fec_dict[k]
+        if item_fec:
+            while True:
+                kk = random.choice(list(video_fec_dict.keys()))
+                if k != kk:
+                    video_fec = video_fec_dict.get(kk)
+                    if video_fec:
+                        y1.append(item_fec)
+                        y2.append(video_fec)
+                        break
+    y1, y2 = torch.stack(y1), torch.stack(y2)
+    neg_label = torch.tensor([0.0], dtype=torch.long)
+    assert y1.size(0) == y2.size(0)
+    neg_train_dataset = TensorDataset(y1, y2)
+    neg_train_sampler = RandomSampler(neg_train_dataset)
+    neg_data_loader = DataLoader(neg_train_dataset, sampler=neg_train_sampler, batch_size=1)
+    neg_data_loader_iter = iter(neg_data_loader)
+    logger.info("*********Running training***********")
+    logger.info(f"  number examples:{len(x1.size(0))}")
+    logger.info(f'                batch size :    {1}')
+    logger.info(f'    number of steps :{x1.size(0) / 1}')
+    # data_loader = build_detection_train_loader(cfg, mapper=mapper)
     logger.info("Starting training from iteration {}".format(start_iter))
-    criterion = nn.CrossEntropyLoss()
-
+    # criterion = nn.CrossEntropyLoss()
+    criterion = nn.BCEWithLogitsLoss()
+    num_epochs = 4
     with EventStorage(start_iter) as storage:
-        for batch, iteration in zip(data_loader, range(start_iter, max_iter)):
-            iteration += 1
-            start_time = time.time()
-            storage.step()
-            label = torch.tensor([1.0], dtype=torch.long).cuda()
-            pos_pair_num, running_loss = 0, 0.0
-            for data in batch:
-                try:
-                    x1_fec = get_roi_feat(data['train_x1'].cuda(), od_model)[0].unsqueeze(0)
-                    x1_fec = x1_fec.detach()
-                except:
-                    continue
-                for x2s in data['train_x2']:
-                    try:
-                        x2s_fec = get_roi_feat(x2s.cuda(), od_model)[0].unsqueeze(0)
-                        x2s_fec = x2s_fec.detach()
-                    except:
-                        continue
-                    pos_pair_num += 1
-                    # loss_dict = model(data)
-                    # print(x1_fec.shape, '======================', x2s_fec.shape)
-                    optimizer.zero_grad()
-                    output = mmmodel(x1_fec.cuda(), x2s_fec.cuda())
-                    loss = criterion(output, label)
-                    assert torch.isfinite(loss).all()
-                    loss.backward()
-                    optimizer.step()
-                    running_loss += loss.item()
-                storage.put_scalar("lr", optimizer.param_groups[0]["lr"], smoothing_hint=False)
-                scheduler.step()
-            if iteration - start_iter > 5 and (iteration % 20 == 0 or iteration == max_iter):
-                for writer in writers:
-                    writer.write()
-                chk_file_name = os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR, f'checkpoint_{iteration}.pth')
-                logger.info(f'saved model to :{chk_file_name}')
-                torch.save(mmmodel.state_dict(), chk_file_name)
-            # if iteration - start_iter > 5 and (iteration % 100 == 0 or iteration == max_iter):
-            #     torch.save(mmmodel, os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR) + f'checkpoint_{iteration}.pth')
-            # 'mm_outputs/checkpoint_' + str(epoch + 1) + '.pth')
-            periodic_checkpointer.step(iteration)
-            end_time = time.time()
-            logger.info(f'[iteration:{iteration}, Pos_pair_num:{pos_pair_num}, Neg_pair_num:{0}] \
-                loss: {running_loss / pos_pair_num:.4f}, time(s): {end_time - start_time}')
+        global_step = 0
+        nb_tr_examples, nb_tr_steps = 0, 0
+        for i_ in tqdm(range(int(num_epochs)), desc="Epoch"):
+            tr_loss = 0
+            nb_tr_examples, nb_tr_steps = 0, 0
+            for step, batch in enumerate(tqdm(pos_data_loader, desc='Iteration')):
+                start_time = time.time()
+                storage.step()
+                x1, x2 = batch
+                optimizer.zero_grad()
+                loss = criterion(mmmodel(x1, x2), pos_label).mean()
+                assert torch.isfinite(loss).all()
+                tr_loss += loss.item()
+                loss.backward()
+                nb_tr_examples += 1
+                nb_tr_steps += 1
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.step()
+                scheduler.setp()
 
-            # {
-            #     'filename_x1': image_x1,
-            #     'filename_x1': torch.as_tensor(images_x2),
-            #     'item_id': item_id,
-            # }
-            # x1 = data['train_x1']
-            # x2 = data['train_x2']
-            # print(x1.shape, x2.shape)
-            # loss_dict = model(data)
-            # losses = sum(loss_dict.values())
-            # assert torch.isfinite(losses).all(), loss_dict
+                nx1, nx2 = next(neg_data_loader_iter)
+                optimizer.zero_grad()
+                loss = criterion(mmmodel(nx1, nx2), neg_label).mean()
+                assert torch.isfinite(loss).all()
+                tr_loss += loss.item()
+                loss.backward()
+                nb_tr_examples += 1
+                nb_tr_steps += 1
+                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+                optimizer.step()
+                storage.put_scalar("loss", tr_loss / nb_tr_steps, smoothing_hint=False)
+                scheduler.setp()
+                if nb_tr_steps > 5 and (nb_tr_steps % 20 == 0 or nb_tr_steps == max_iter):
+                    for writer in writers:
+                        writer.write()
+                periodic_checkpointer.step(nb_tr_steps)
+                end_time = time.time()
+                logger.info(
+                    f'[iteration:{nb_tr_steps} loss: {tr_loss / nb_tr_steps:.4f}, time(s): {end_time - start_time}')
+    chk_file_name = os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR, f'checkpoint_{nb_tr_steps}.pth')
+    logger.info(f'saved model to :{chk_file_name}')
+    torch.save(mmmodel.state_dict(), chk_file_name)
     return 0
 
 
@@ -347,7 +381,7 @@ def main(args):
     mmcfg.DATASETS.TEST = ("match_val",)
     mmcfg.DATALOADER.NUM_WORKERS = 2
     # 从 Model Zoo 中获取预训练模型
-    mmcfg.MODEL.WEIGHTS = "mmoutput/checkpoint_1000.pth"
+    mmcfg.MODEL.WEIGHTS = "model/mmmodel_final.pth"
     mmcfg.SOLVER.IMS_PER_BATCH = 32
     mmcfg.MODEL.MASK_ON = False
     mmcfg.SOLVER.BASE_LR = 0.00025  # 学习率
@@ -369,7 +403,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    # ./train_match.py --num-gpu 2 --resume
+    # python train_match.py --num-gpu 2 --resume 
     args = default_argument_parser().parse_args()
     args.config_file = 'configs/COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml'
     logger.info(f"Command Line Args:{args}")
@@ -381,6 +415,3 @@ if __name__ == "__main__":
         dist_url=args.dist_url,
         args=(args,),
     )
-
-
-    ddd
