@@ -60,9 +60,12 @@ for _, k in enumerate(tqdm(train_image_cache_dict.keys())):
     file_name_list = v['file_pair']
     for file_name in file_name_list[1:]:
         # file_name v_064844_360
-        tmpname = os.path.join(root_dir, 'data', train_dir_num, 'video_images', file_name + '.jpg')
-        img = torch.as_tensor(utils.read_image(tmpname, 'BGR').astype("float32").transpose(2, 0, 1))
-        item_fec_list.append(get_roi_feat(img, od_model).mean(axis=0))
+        try:
+            tmpname = os.path.join(root_dir, 'data', train_dir_num, 'video_images', file_name + '.jpg')
+            img = torch.as_tensor(utils.read_image(tmpname, 'BGR').astype("float32").transpose(2, 0, 1))
+            item_fec_list.append(get_roi_feat(img, od_model).mean(axis=0))
+        except:
+            continue
     try:
         result_fec_dict[k] = torch.cat([x.unsqueeze(0) for x in item_fec_list]).mean(axis=0).unsqueeze(0).cpu()
     except:
