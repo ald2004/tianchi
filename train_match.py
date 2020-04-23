@@ -12,10 +12,8 @@ from detectron2.checkpoint import DetectionCheckpointer, PeriodicCheckpointer
 from detectron2.config import get_cfg
 from detectron2.data import (
     detection_utils as utils,
-    MetadataCatalog,
 )
 from detectron2.engine import default_argument_parser, default_setup, launch
-from detectron2.modeling import build_model
 from detectron2.solver import (
     build_lr_scheduler,
     build_optimizer,
@@ -77,7 +75,7 @@ def setup(args):
     cfg.DATALOADER.NUM_WORKERS = 2
     # 从 Model Zoo 中获取预训练模型
     cfg.MODEL.WEIGHTS = "output/model_final.pth"
-    cfg.SOLVER.IMS_PER_BATCH = 8
+    cfg.SOLVER.IMS_PER_BATCH = 256
     cfg.MODEL.MASK_ON = False
     cfg.SOLVER.BASE_LR = 0.00025  # 学习率
     cfg.SOLVER.MAX_ITER = 10000  # 最大迭代次数 150000/8
@@ -231,16 +229,6 @@ def get_roi_feat(images, od_model):
 
 def do_train(cfg, mmmodel, resume=False):
     mmmodel.train()
-    # od_model.eval()
-    # for d in [
-    #     cfg.DATASETS.TRAIN[0],
-    #     # cfg.DATASETS.TEST[0,
-    # ]:
-    #     DatasetCatalog.register(d, lambda d=d: get_trainval_pos_pair_dicts(d))
-    #     MetadataCatalog.get(d).set(thing_classes=["cloth"])
-    #     if d.endswith('val'):
-    #         MetadataCatalog.get(d).evaluator_type = "coco"
-
     # optimizer = optim.SGD(mmmodel.parameters(), lr=0.0025, momentum=0.9)
     optimizer = build_optimizer(cfg, mmmodel)
     scheduler = build_lr_scheduler(cfg, optimizer)
@@ -253,14 +241,14 @@ def do_train(cfg, mmmodel, resume=False):
             get("iteration", -1) + 1
     )
     max_iter = cfg.SOLVER.MAX_ITER
-
-    periodic_checkpointer = PeriodicCheckpointer(
-        checkpointer, cfg.SOLVER.CHECKPOINT_PERIOD, max_iter=max_iter
-    )
+    #
+    # periodic_checkpointer = PeriodicCheckpointer(
+    #     checkpointer, cfg.SOLVER.CHECKPOINT_PERIOD, max_iter=max_iter
+    # )
 
     writers = (
         [
-            CommonMetricPrinter(max_iter),
+            # CommonMetricPrinter(max_iter),
             JSONWriter(os.path.join(cfg.OUTPUT_DIR, "metrics.json")),
             TensorboardXWriter(cfg.OUTPUT_DIR),
         ]
@@ -276,104 +264,110 @@ def do_train(cfg, mmmodel, resume=False):
     x1, x2 = [], []
     for k in pic_fec_dict.keys():
         item_fec = pic_fec_dict[k]
-        if item_fec:
-            video_fec = video_fec_dict.get(k)
-            if video_fec:
-                x1.append(item_fec)
-                x2.append(video_fec)
+        video_fec = video_fec_dict.get(k)
+        if video_fec is not None:
+            x1.append(item_fec)
+            x2.append(video_fec)
     x1, x2 = torch.stack(x1), torch.stack(x2)
-    pos_label = torch.tensor([1.0], dtype=torch.long)
     assert x1.size(0) == x2.size(0)
     pos_train_dataset = TensorDataset(x1, x2)
     pos_train_sampler = RandomSampler(pos_train_dataset)
-    pos_data_loader = DataLoader(pos_train_dataset, sampler=pos_train_sampler, batch_size=1)
+    pos_data_loader = DataLoader(pos_train_dataset, sampler=pos_train_sampler, batch_size=cfg.SOLVER.IMS_PER_BATCH)
 
     y1, y2 = [], []
     for k in pic_fec_dict.keys():
         item_fec = pic_fec_dict[k]
-        if item_fec:
-            while True:
-                kk = random.choice(list(video_fec_dict.keys()))
-                if k != kk:
-                    video_fec = video_fec_dict.get(kk)
-                    if video_fec:
-                        y1.append(item_fec)
-                        y2.append(video_fec)
-                        break
+        while True:
+            kk = random.choice(list(video_fec_dict.keys()))
+            if k != kk:
+                video_fec = video_fec_dict.get(kk)
+                if video_fec is not None:
+                    y1.append(item_fec)
+                    y2.append(video_fec)
+                    break
     y1, y2 = torch.stack(y1), torch.stack(y2)
-    neg_label = torch.tensor([0.0], dtype=torch.long)
+    # neg_label = torch.tensor([[0.0, 0.0]], dtype=torch.float).cuda()
     assert y1.size(0) == y2.size(0)
     neg_train_dataset = TensorDataset(y1, y2)
     neg_train_sampler = RandomSampler(neg_train_dataset)
-    neg_data_loader = DataLoader(neg_train_dataset, sampler=neg_train_sampler, batch_size=1)
+    neg_data_loader = DataLoader(neg_train_dataset, sampler=neg_train_sampler, batch_size=cfg.SOLVER.IMS_PER_BATCH)
     neg_data_loader_iter = iter(neg_data_loader)
     logger.info("*********Running training***********")
-    logger.info(f"  number examples:{len(x1.size(0))}")
-    logger.info(f'                batch size :    {1}')
-    logger.info(f'    number of steps :{x1.size(0) / 1}')
+    logger.info(f'     number examples:{x1.size(0)}')
+    logger.info(f'              batch size :    {1}')
+    logger.info(f'number of steps :{x1.size(0) / 1}')
     # data_loader = build_detection_train_loader(cfg, mapper=mapper)
     logger.info("Starting training from iteration {}".format(start_iter))
-    # criterion = nn.CrossEntropyLoss()
-    criterion = nn.BCEWithLogitsLoss()
-    num_epochs = 4
+    criterion = nn.CrossEntropyLoss()
+    # criterion = nn.BCEWithLogitsLoss()
+    EPOCH_NUM = 4
     with EventStorage(start_iter) as storage:
-        global_step = 0
-        nb_tr_examples, nb_tr_steps = 0, 0
-        for i_ in tqdm(range(int(num_epochs)), desc="Epoch"):
-            tr_loss = 0
-            nb_tr_examples, nb_tr_steps = 0, 0
-            for step, batch in enumerate(tqdm(pos_data_loader, desc='Iteration')):
-                start_time = time.time()
-                storage.step()
-                x1, x2 = batch
-                optimizer.zero_grad()
-                loss = criterion(mmmodel(x1, x2), pos_label).mean()
-                assert torch.isfinite(loss).all()
-                tr_loss += loss.item()
-                loss.backward()
-                nb_tr_examples += 1
-                nb_tr_steps += 1
-                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                optimizer.step()
-                scheduler.setp()
+        # with EventStorage(0) as storage:
+        running_loss = 0.0
+        for batch, iteration in zip(pos_data_loader, range(start_iter, max_iter)):
+            # start_time = time.time()
+            storage.step()
+            x1_fec, x2s_fec = batch
+            x1_fec = x1_fec[0].detach()
+            x2s_fec = x2s_fec[0].detach()
+            if not torch.isfinite(x1_fec).any() or not torch.isfinite(x2s_fec).any(): continue
+            iteration += start_iter + 1
+            optimizer.zero_grad()
+            output = mmmodel(x1_fec.cuda(), x2s_fec.cuda())
+            pos_label = torch.tensor([1.], dtype=torch.long).cuda()
+            loss = criterion(output, pos_label)
+            assert torch.isfinite(loss).all()
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+            scheduler.step()
 
+            try:
                 nx1, nx2 = next(neg_data_loader_iter)
-                optimizer.zero_grad()
-                loss = criterion(mmmodel(nx1, nx2), neg_label).mean()
-                assert torch.isfinite(loss).all()
-                tr_loss += loss.item()
-                loss.backward()
-                nb_tr_examples += 1
-                nb_tr_steps += 1
-                # torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-                optimizer.step()
-                storage.put_scalar("loss", tr_loss / nb_tr_steps, smoothing_hint=False)
-                scheduler.setp()
-                if nb_tr_steps > 5 and (nb_tr_steps % 20 == 0 or nb_tr_steps == max_iter):
-                    for writer in writers:
-                        writer.write()
-                periodic_checkpointer.step(nb_tr_steps)
-                end_time = time.time()
-                logger.info(
-                    f'[iteration:{nb_tr_steps} loss: {tr_loss / nb_tr_steps:.4f}, time(s): {end_time - start_time}')
-    chk_file_name = os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR, f'checkpoint_{nb_tr_steps}.pth')
-    logger.info(f'saved model to :{chk_file_name}')
-    torch.save(mmmodel.state_dict(), chk_file_name)
+            except:
+                continue
+            nx1, nx2 = nx1[0].detach(), nx2[0].detach()
+            if not torch.isfinite(nx1).any() or not torch.isfinite(nx2).any(): continue
+            optimizer.zero_grad()
+            neg_label = torch.tensor([0.0], dtype=torch.long).cuda()
+            loss = criterion(mmmodel(nx1.cuda(), nx2.cuda()), neg_label)
+            assert torch.isfinite(loss).all()
+            loss.backward()
+            iteration += 1
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
+            running_loss += loss.item()
+            if comm.is_main_process():
+                storage.put_scalar("loss", running_loss / iteration, smoothing_hint=False)
+            storage.put_scalar("lr", optimizer.param_groups[0]["lr"], smoothing_hint=False)
+            # scheduler.step()
+            # periodic_checkpointer.step(iteration)
+            # end_time = time.time()
+            if iteration % 20 == 0:
+                for writer in writers:
+                    writer.write()
+            logger.info(
+                f'[iteration:{iteration}, loss: {running_loss / iteration:.4f}')
+            # if iteration > 5 and (iteration % 5000 == 0 or iteration == max_iter):
+            #     chk_file_name = os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR, f'checkpoint_{iteration}.pth')
+            #     logger.info(f'saved model to :{chk_file_name}')
+            #     torch.save(mmmodel.state_dict(), chk_file_name)
+
     return 0
 
 
 def main(args):
-    MetadataCatalog.get("tianchi_val").set(thing_classes=["cloth"])
-    # # MetadataCatalog.get("tianchi_val").evaluator_type = "coco"
-    # balloon_metadata = MetadataCatalog.get("tianchi_val")
-    cfg = get_cfg()
-    cfg.merge_from_file("configs/COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml")
-    cfg.MODEL.WEIGHTS = os.path.join('/opt/gitserial/tianchi/output', "model_final.pth")
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.7  # set the testing threshold for this model
-    cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1
-    cfg.DATASETS.TEST = ("tianchi_val",)
-    od_model = build_model(cfg).cuda()
-    DetectionCheckpointer(od_model).load(cfg.MODEL.WEIGHTS)
+    # MetadataCatalog.get("tianchi_val").set(thing_classes=["cloth"])
+    # # # MetadataCatalog.get("tianchi_val").evaluator_type = "coco"
+    # # balloon_metadata = MetadataCatalog.get("tianchi_val")
+    # cfg = get_cfg()
+    # cfg.merge_from_file("configs/COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml")
+    # cfg.MODEL.WEIGHTS = os.path.join('/opt/gitserial/tianchi/output', "model_final.pth")
+    # cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.7  # set the testing threshold for this model
+    # cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1
+    # cfg.DATASETS.TEST = ("tianchi_val",)
+    # od_model = build_model(cfg).cuda()
+    # DetectionCheckpointer(od_model).load(cfg.MODEL.WEIGHTS)
     # logging.getLogger().disabled = True
     mmcfg = get_cfg()
     mmcfg.OUTPUT_DIR = 'mmoutput'
@@ -382,28 +376,27 @@ def main(args):
     mmcfg.DATALOADER.NUM_WORKERS = 2
     # 从 Model Zoo 中获取预训练模型
     mmcfg.MODEL.WEIGHTS = "model/mmmodel_final.pth"
-    mmcfg.SOLVER.IMS_PER_BATCH = 32
+    mmcfg.SOLVER.IMS_PER_BATCH = 1
     mmcfg.MODEL.MASK_ON = False
     mmcfg.SOLVER.BASE_LR = 0.00025  # 学习率
-    mmcfg.SOLVER.MAX_ITER = 3750  # 最大迭代次数 30000/8
-    mmcfg.SOLVER.MAX_ITER = 1050  # 最大迭代次数 30000/32
+    mmcfg.SOLVER.MAX_ITER = 60000  # 最大迭代次数 30000/32
     mmcfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128
     mmcfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # 只有一个类别：红绿灯
     mmcfg.NUM_GPUS = 2
     mmcfg.DATALOADER.ASPECT_RATIO_GROUPING = False
     os.makedirs(mmcfg.OUTPUT_DIR, exist_ok=True)
     mmmodel = MatchModel().cuda()
-    mmmodel.load_state_dict(torch.load(mmcfg.MODEL.WEIGHTS))
+    # mmmodel.load_state_dict(torch.load(mmcfg.MODEL.WEIGHTS)['model'])
     # distributed = comm.get_world_size() > 1
     # if distributed:
     #     od_model = DistributedDataParallel(od_model, device_ids=[comm.get_local_rank()], broadcast_buffers=False)
     #     mmmodel = DistributedDataParallel(mmmodel, device_ids=[comm.get_local_rank()], broadcast_buffers=False)
-    logger.info(mmcfg)
-    return do_train(mmcfg, od_model, mmmodel, resume=True)
+    # logger.info(mmcfg)
+    return do_train(mmcfg, mmmodel, resume=args.resume)
 
 
 if __name__ == "__main__":
-    # python train_match.py --num-gpu 2 --resume 
+    # python train_match.py --num-gpu 2 --resume
     args = default_argument_parser().parse_args()
     args.config_file = 'configs/COCO-Detection/faster_rcnn_R_50_FPN_3x.yaml'
     logger.info(f"Command Line Args:{args}")
