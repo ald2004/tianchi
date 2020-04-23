@@ -303,15 +303,16 @@ def do_train(cfg, mmmodel, resume=False):
     EPOCH_NUM = 4
     with EventStorage(start_iter) as storage:
         # with EventStorage(0) as storage:
-        running_loss = 0.0
-        for batch, iteration in zip(pos_data_loader, range(start_iter, max_iter)):
+        # running_loss = 0.0
+        iteration, running_loss = 0, 0.
+        for batch, _ in zip(pos_data_loader, range(start_iter, max_iter)):
             # start_time = time.time()
             storage.step()
             x1_fec, x2s_fec = batch
             x1_fec = x1_fec[0].detach()
             x2s_fec = x2s_fec[0].detach()
             if not torch.isfinite(x1_fec).any() or not torch.isfinite(x2s_fec).any(): continue
-            iteration += start_iter + 1
+            iteration += 1
             optimizer.zero_grad()
             output = mmmodel(x1_fec.cuda(), x2s_fec.cuda())
             pos_label = torch.tensor([1.], dtype=torch.long).cuda()
@@ -338,7 +339,7 @@ def do_train(cfg, mmmodel, resume=False):
             optimizer.step()
             running_loss += loss.item()
             if comm.is_main_process():
-                storage.put_scalar("loss", running_loss / iteration, smoothing_hint=False)
+                storage.put_scalar("loss", running_loss/iteration, smoothing_hint=False)
             storage.put_scalar("lr", optimizer.param_groups[0]["lr"], smoothing_hint=False)
             # scheduler.step()
             # periodic_checkpointer.step(iteration)
@@ -347,7 +348,7 @@ def do_train(cfg, mmmodel, resume=False):
                 for writer in writers:
                     writer.write()
             logger.info(
-                f'[iteration:{iteration}, loss: {running_loss / iteration:.4f}')
+                f'[iteration:{iteration}, loss: {running_loss/iteration:.4f}')
             # if iteration > 5 and (iteration % 5000 == 0 or iteration == max_iter):
             #     chk_file_name = os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR, f'checkpoint_{iteration}.pth')
             #     logger.info(f'saved model to :{chk_file_name}')
@@ -375,18 +376,24 @@ def main(args):
     mmcfg.DATASETS.TEST = ("match_val",)
     mmcfg.DATALOADER.NUM_WORKERS = 2
     # 从 Model Zoo 中获取预训练模型
-    mmcfg.MODEL.WEIGHTS = "model/mmmodel_final.pth"
+    try:
+        with open('mmoutput/last_checkpoint', 'r') as fid:
+            mmcfg.MODEL.WEIGHTS = os.path.join('mmoutput', ''.join(fid.readlines()))
+    except:
+        mmcfg.MODEL.WEIGHTS = ''  # "model/model_0029999.pth"
+
     mmcfg.SOLVER.IMS_PER_BATCH = 1
     mmcfg.MODEL.MASK_ON = False
     mmcfg.SOLVER.BASE_LR = 0.00025  # 学习率
-    mmcfg.SOLVER.MAX_ITER = 60000  # 最大迭代次数 30000/32
+    mmcfg.SOLVER.MAX_ITER = 120000  # 最大迭代次数 30000/32
     mmcfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128
     mmcfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # 只有一个类别：红绿灯
     mmcfg.NUM_GPUS = 2
     mmcfg.DATALOADER.ASPECT_RATIO_GROUPING = False
     os.makedirs(mmcfg.OUTPUT_DIR, exist_ok=True)
     mmmodel = MatchModel().cuda()
-    # mmmodel.load_state_dict(torch.load(mmcfg.MODEL.WEIGHTS)['model'])
+    if args.resume:
+        mmmodel.load_state_dict(torch.load(mmcfg.MODEL.WEIGHTS)['model'])
     # distributed = comm.get_world_size() > 1
     # if distributed:
     #     od_model = DistributedDataParallel(od_model, device_ids=[comm.get_local_rank()], broadcast_buffers=False)
