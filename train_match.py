@@ -375,6 +375,7 @@ def main(args):
     mmcfg.DATASETS.TRAIN = ("match_train",)
     mmcfg.DATASETS.TEST = ("match_val",)
     mmcfg.DATALOADER.NUM_WORKERS = 2
+    mmcfg.SOLVER.CHECKPOINT_PERIOD = 60000
     # 从 Model Zoo 中获取预训练模型
     try:
         with open('mmoutput/last_checkpoint', 'r') as fid:
