@@ -231,6 +231,7 @@ def do_train(cfg, mmmodel, resume=False):
     mmmodel.train()
     # optimizer = optim.SGD(mmmodel.parameters(), lr=0.0025, momentum=0.9)
     optimizer = build_optimizer(cfg, mmmodel)
+    # optimizer = optim.SGD(m_model.parameters(), lr=0.0025, momentum=0.9)
     scheduler = build_lr_scheduler(cfg, optimizer)
 
     checkpointer = DetectionCheckpointer(
@@ -311,11 +312,11 @@ def do_train(cfg, mmmodel, resume=False):
             x1_fec, x2s_fec = batch
             x1_fec = x1_fec[0].detach()
             x2s_fec = x2s_fec[0].detach()
-            if not torch.isfinite(x1_fec).any() or not torch.isfinite(x2s_fec).any(): continue
+            if not torch.isfinite(x1_fec).all() or not torch.isfinite(x2s_fec).all(): continue
             iteration += 1
             optimizer.zero_grad()
             output = mmmodel(x1_fec.cuda(), x2s_fec.cuda())
-            pos_label = torch.tensor([1.], dtype=torch.long).cuda()
+            pos_label = torch.tensor([0.], dtype=torch.long).cuda()
             loss = criterion(output, pos_label)
             assert torch.isfinite(loss).all()
             loss.backward()
@@ -328,10 +329,11 @@ def do_train(cfg, mmmodel, resume=False):
             except:
                 continue
             nx1, nx2 = nx1[0].detach(), nx2[0].detach()
-            if not torch.isfinite(nx1).any() or not torch.isfinite(nx2).any(): continue
+            if not torch.isfinite(nx1).all() or not torch.isfinite(nx2).all(): continue
             optimizer.zero_grad()
-            neg_label = torch.tensor([0.0], dtype=torch.long).cuda()
-            loss = criterion(mmmodel(nx1.cuda(), nx2.cuda()), neg_label)
+            output=mmmodel(nx1.cuda(), nx2.cuda())
+            neg_label = torch.tensor([1.], dtype=torch.long).cuda()
+            loss = criterion(output, neg_label)
             assert torch.isfinite(loss).all()
             loss.backward()
             iteration += 1
@@ -349,10 +351,10 @@ def do_train(cfg, mmmodel, resume=False):
                     writer.write()
             logger.info(
                 f'[iteration:{iteration}, loss: {running_loss/iteration:.4f}')
-            # if iteration > 5 and (iteration % 5000 == 0 or iteration == max_iter):
-            #     chk_file_name = os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR, f'checkpoint_{iteration}.pth')
-            #     logger.info(f'saved model to :{chk_file_name}')
-            #     torch.save(mmmodel.state_dict(), chk_file_name)
+            if iteration > 5 and (iteration % 50000 == 0 or iteration == max_iter):
+                chk_file_name = os.path.join(os.path.abspath('.'), cfg.OUTPUT_DIR, f'checkpoint_{iteration}.pth')
+                logger.info(f'saved model to :{chk_file_name}')
+                torch.save(mmmodel.state_dict(), chk_file_name)
 
     return 0
 
@@ -386,7 +388,7 @@ def main(args):
     mmcfg.SOLVER.IMS_PER_BATCH = 1
     mmcfg.MODEL.MASK_ON = False
     mmcfg.SOLVER.BASE_LR = 0.00025  # 学习率
-    mmcfg.SOLVER.MAX_ITER = 120000  # 最大迭代次数 30000/32
+    mmcfg.SOLVER.MAX_ITER = 200000  # 最大迭代次数 30000/32
     mmcfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128
     mmcfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # 只有一个类别：红绿灯
     mmcfg.NUM_GPUS = 2
